@@ -1,0 +1,177 @@
+#!/bin/bash
+# Script to batch normalize files to EBU R 128 (-23 LUFS Integrated) or another specified target.
+# Copyright © 2021 chmaha
+# Utilizing sound-gambit by Robin Gareus https://github.com/x42/sound-gambit
+      
+# Usage: ebu-norm <option> <input files>.                          
+# Option: 
+#  -t   Specify integrated loudness target, e.g. -t -20  
+
+# sound-gambit threshold value (change to lower value (range 0 to -10), e.g. -1.3 in case of true peak overage)     
+THR=-1
+# sound-gambit release time (default 10, range 1 to 1000)
+REL=10
+
+# Check availability of dependencies
+function checkAvail()
+{
+	which "$1" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]
+	then
+		echo "tool \"$1\" not found." >&2
+		exit 1
+	fi
+}
+
+for tool in {ffmpeg,bc,sound-gambit}; \
+	do checkAvail "$tool"; done
+
+#Check for audio files
+NUMARG=0
+for file in "$@"; do
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+then
+	((NUMARG=NUMARG+1))
+fi
+done
+
+# Select LUFS target based on -t flag or -23 LUFS default
+if [ $# -eq 0 ]
+then
+	echo "Usage: ebu-norm <option> <input files>"
+	echo "	Option:" 
+	echo " 	 -t   Specify integrated loudness target, e.g. -t -20" 
+	exit
+elif [ "$1" = "-t" ] && [ $# -eq 1 ]
+then
+	echo "Please add an integrated target and some audio files"
+	exit	
+elif [ $NUMARG -eq 0 ]
+then
+	echo "No compatible audio files present. ebu-norm accepts wav, aiff, flac, mp3, ogg, opus and wavpack."
+	exit
+
+elif [ "$1" = "-t" ] && [ -f "$2" ] 
+then
+	TARGET=-23
+	shift
+	echo "Please enter a value (-12 or lower) if using the -t flag"
+	exit
+elif [ "$1" = "-t" ] && [ "$2" -gt -12 ]
+then
+	echo "Please enter an integrated value -12 or lower"
+	exit	
+elif [ "$1" = "-t" ] 
+then
+	TARGET=$2
+	echo "The target is $TARGET LUFS integrated"
+	echo "Using sound-gambit (x42) with release time of $REL ms and threshold $THR dBFS..."
+	shift ; shift
+	sleep 3
+else
+	TARGET=-23
+	echo "The target is $TARGET LUFS integrated"
+	echo "Using sound-gambit (x42) with release time of $REL ms and threshold $THR dBFS..."
+	sleep 3
+fi
+
+# Create subfolder for normalized files
+path=$(realpath "$1")
+dirname="${path%/*}"
+mkdir -p "$dirname/ebu-norm"
+
+# Create temp dir and audio files
+TEMPDIR=$(mktemp -d)	
+touch "$TEMPDIR/skipped.txt"
+SKIPPED=0
+
+for file in "$@"; do
+# Separate name of file 
+FILENAME=${file##*/}
+FNAME="${FILENAME%.*}"
+EXT="${file##*.}"
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ];
+then
+	# Loudness, peak and gain analysis
+	ffmpeg -i "$file" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la.txt" 2>&1
+	INT_VALUE=$(awk '/I:   / {print $2}' "$TEMPDIR/la.txt") 
+	PEAK_VALUE=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la.txt")  
+	GAIN=$(echo $TARGET "-" $INT_VALUE | bc )
+
+	if [ $(echo $PEAK_VALUE "+" $GAIN "> -1" | bc ) -eq 1 ]
+	then
+		# sound-gambit 
+		sound-gambit -i $GAIN -t $THR -r $REL -T "$file" "$TEMPDIR/audioout.$EXT"
+		
+		# Second analysis pass
+		ffmpeg -i "$TEMPDIR/audioout.$EXT" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la-2ndpass.txt" 2>&1
+		INT_VALUE2=$(awk '/I:   / {print $2}' "$TEMPDIR/la-2ndpass.txt") 
+		PEAK_VALUE2=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la-2ndpass.txt")
+		GAIN2=$(echo $TARGET "-" $INT_VALUE2 | bc )	
+		PEAKR=$(echo $PEAK_VALUE "+" $GAIN "-" $PEAK_VALUE2 "-" $GAIN2 | bc )
+		REVGAIN=$(echo $GAIN "+" $GAIN2 | bc )
+
+		# Apply revised gain after integrated check
+		sound-gambit -i $REVGAIN -t $THR -r $REL -T "$file" "$dirname/ebu-norm/$FNAME-ebu-norm.$EXT"
+		echo	
+		echo $file
+		echo "$GAIN dB of gain applied with $PEAKR dB of peak limiting..."
+	else
+		# Apply basic gain without limiting
+		sound-gambit -i $GAIN -t $THR -r $REL -T "$file" "$dirname/ebu-norm/$FNAME-ebu-norm.$EXT"
+		echo	
+		echo $file
+		echo "$GAIN dB of gain applied..."
+	fi
+
+elif [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ]
+then
+	# Loudness, peak and gain analysis
+	ffmpeg -i "$file" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la.txt" 2>&1	
+	INT_VALUE=$(awk '/I:   / {print $2}' "$TEMPDIR/la.txt") 
+	PEAK_VALUE=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la.txt")  
+	GAIN=$(echo $TARGET "-" $INT_VALUE | bc )
+
+	if [ $(echo $PEAK_VALUE "+" $GAIN "> -1" | bc ) -eq 1 ]
+	then
+		# sound-gambit 
+		ffmpeg -v 'fatal' -i "$file" -f wav - | sound-gambit -i $GAIN -t $THR -r $REL -T - "$TEMPDIR/audioout.wav"
+
+		# Second analysis pass
+		ffmpeg -i "$TEMPDIR/audioout.wav" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la-2ndpass.txt" 2>&1
+		INT_VALUE2=$(awk '/I:   / {print $2}' "$TEMPDIR/la-2ndpass.txt")  
+		PEAK_VALUE2=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la-2ndpass.txt")
+		GAIN2=$(echo $TARGET "-" $INT_VALUE2 | bc )	
+		PEAKR=$(echo $PEAK_VALUE "+" $GAIN "-" $PEAK_VALUE2 "-" $GAIN2 | bc )
+		REVGAIN=$(echo $GAIN "+" $GAIN2 | bc )
+		
+		# Apply revised gain after integrated check
+		ffmpeg -v 'fatal' -i "$file" -f wav - | sound-gambit -i $REVGAIN -t $THR -r $REL -T - "$dirname/ebu-norm/$FNAME-$EXT-ebu-norm.wav"
+		echo	
+		echo $file
+		echo "$GAIN dB of gain applied with $PEAKR dB of peak limiting..."
+	else
+		# Apply basic gain without limiting
+		ffmpeg -v 'fatal' -i "$file" -f wav - | sound-gambit -i $GAIN -t $THR -r $REL - "$dirname/ebu-norm/$FNAME-$EXT-ebu-norm.wav"
+		echo	
+		echo $file
+		echo "$GAIN dB of gain applied..."
+	fi
+
+
+elif 	[ -f "$file" ]
+then
+	((SKIPPED=SKIPPED+1))
+	echo "$file" >> "$TEMPDIR/skipped.txt"
+else
+	:
+fi
+done
+
+echo
+echo "Skipped items: $SKIPPED"
+cat "$TEMPDIR/skipped.txt"
+rm -r "$TEMPDIR"
+echo
+. ${BASH_SOURCE%/*}/ebu-scan "$dirname"/ebu-norm/*

@@ -1,0 +1,127 @@
+#!/bin/bash
+# Script to batch normalize files to -1 dBTP or desired true peak value
+# Copyright © 2021 chmaha
+
+# Usage: tp-norm <option> <input files>.                          
+# Option: 
+#  -t   Specify true peak target, e.g. -t -2 
+
+# Check availability of dependencies
+function checkAvail()
+{
+	which "$1" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]
+	then
+		echo "tool \"$1\" not found." >&2
+		exit 1
+	fi
+}
+
+for tool in {ffmpeg,bc}; \
+	do checkAvail "$tool"; done
+
+#Check for audio files
+NUMARG=0
+for file in "$@"; do
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+then
+	((NUMARG=NUMARG+1))
+fi
+done
+
+# Select true peak target based on -t flag or -1 dBTP default
+if [ $# -eq 0 ]
+then
+	echo "Usage: tp-norm <option> <input files>"
+	echo "	Option:"
+	echo "	 -t   Specify true peak target, e.g. -t -2"
+	exit
+elif [ "$1" = "-t" ] && [ $# -eq 1 ]
+then
+	echo "Please add a true peak target and some audio files"
+	exit
+elif [ $NUMARG -eq 0 ]
+then
+	echo "No compatible audio files present. tp-norm accepts wav, aiff, flac, mp3, ogg, opus and wavpack."
+	exit
+
+elif [ "$1" = "-t" ] && [ -f "$2" ] 
+then
+	TARGET=-1
+	shift
+	echo "Please enter a true peak value (0 or lower) if using the -t flag"
+	exit
+elif [ "$1" = "-t" ] && [ "$2" -gt 0 ]
+then
+	echo "Please enter a true peak value 0 or lower"
+	exit
+elif [ "$1" = "-t" ] 
+then
+	TARGET=$2
+	echo "The target is $TARGET dBTP..."
+	shift ; shift
+	sleep 3
+else
+	TARGET=-1
+	echo "The target is -1 dBTP..."
+	sleep 3
+fi
+
+TEMPDIR=$(mktemp -d)
+touch "$TEMPDIR/skipped.txt"
+
+# Create subfolder for normalized files
+path=$(realpath "$1")
+dirname="${path%/*}"
+mkdir -p "$dirname/tp-norm"
+SKIPPED=0
+
+for file in "$@"; do
+# Separate name of file 
+FILENAME=${file##*/}
+FNAME="${FILENAME%.*}"
+EXT="${file##*.}"
+
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ];
+then
+	# Peak and gain analysis
+	ffmpeg -i "$file" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la.txt" 2>&1 
+	PEAK_VALUE=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la.txt") 
+	GAIN=$(echo $TARGET "-" $PEAK_VALUE | bc )
+
+	# Apply gain
+	ffmpeg -y -v 'fatal' -i "$file" -filter:a "volume=$GAIN dB" "$dirname/tp-norm/$FNAME-tp-norm.$EXT"
+	echo	
+	echo $file
+	echo "$GAIN dB of gain applied..."
+elif [ "${file##*.}" == mp3 ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == wv ]
+then
+	# Convert to temp wav file	
+	ffmpeg -y -v 'fatal' -i "$file" "$TEMPDIR/$FNAME-$EXT.wav"
+
+	# Peak and gain analysis
+	ffmpeg -i "$TEMPDIR/$FNAME-$EXT.wav" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la.txt" 2>&1	
+	PEAK_VALUE=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la.txt")  
+	GAIN=$(echo $TARGET "-" $PEAK_VALUE | bc )
+
+	# Apply gain
+	ffmpeg -y -v 'fatal' -i "$TEMPDIR/$FNAME-$EXT.wav" -filter:a "volume=$GAIN dB" "$dirname/tp-norm/$FNAME-$EXT-tp-norm.wav"
+	echo	
+	echo $file
+	echo "$GAIN dB of gain applied..."
+
+elif [ -f "$file" ]
+then
+	((SKIPPED=SKIPPED+1))
+	echo "$file" >> "$TEMPDIR/skipped.txt"
+else
+:
+fi
+done
+echo
+echo "Skipped items: $SKIPPED"
+cat "$TEMPDIR/skipped.txt"
+rm -r "$TEMPDIR"
+echo
+. ${BASH_SOURCE%/*}/ebu-scan "$dirname"/tp-norm/*

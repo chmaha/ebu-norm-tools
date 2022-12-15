@@ -1,0 +1,130 @@
+#!/bin/bash
+# Script to scan audio files and return true peak and various loudness values
+# Copyright © 2021 chmaha
+
+
+# Usage: ebu-scan <input files>.                          
+
+# Check availability of dependencies
+function checkAvail()
+{
+	which "$1" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]
+	then
+		echo "tool \"$1\" not found." >&2
+		exit 1
+	fi
+}
+
+for tool in ffmpeg ; \
+	do checkAvail "$tool"; done
+
+#Check for audio files and enumerate
+NUMARG=0
+for file in "$@"; do
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+then
+	((NUMARG=NUMARG+1))
+fi
+done
+
+TEMPDIR=$(mktemp -d)
+
+if [ $# -eq 0 ]
+then
+	echo "Usage: ebu-scan <input files>"
+	exit
+elif [ "$1" = "-a" ] && [ $# -eq 1 ]
+then
+	echo "Please add some audio files"
+	exit	 
+elif [ $NUMARG -eq 0 ]
+then
+	echo "No compatible audio files present. ebu-scan accepts wav, aiff, flac, mp3, ogg, opus and wavpack."
+	exit
+elif [ "$1" = "-a" ]
+then
+	shift
+	echo "Treating audio files as album..."
+	sleep 1
+	for file in "$@" ; do 
+	if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+	then	
+		echo -e "file " "'"$(realpath "$file")"'" >> $TEMPDIR/audiofiles.txt
+	fi
+	done
+	ffmpeg -f concat -safe 0 -i $TEMPDIR/audiofiles.txt -af ebur128=peak=true -ar 4410 -f null - > $TEMPDIR/album.txt 2>&1 &
+else
+	:
+fi
+
+# Find real directory name
+path=$(realpath "$1")
+dirname="${path%/*}"
+
+# Create header for analysis file
+echo "File|True Peak|Integrated|Short-term|Momentary|LRA" > "$TEMPDIR/tempanalysis"
+echo "|(dBTP)|(LUFS)|(LUFS)|(LUFS)|(LU)" >> "$TEMPDIR/tempanalysis"
+touch "$TEMPDIR/skipped.txt"
+
+# Count number of files
+NUM=1
+SKIPPED=0
+
+# Delete existing analysis.txt if it exists
+if [ -f "$dirname/loudness_analysis.txt" ]
+then
+	rm "$dirname/loudness_analysis.txt"
+fi
+
+for file in "$@"; do
+# Separate name of file 
+FILENAME=${file##*/}
+
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+then
+	# Loudness, peak and gain analysis
+	ffmpeg -i "$file" -af ebur128=peak=true -ar 4410 -f null - > "$TEMPDIR/la.txt" 2>&1
+	INT=$(awk '/I:   / {print $2}' "$TEMPDIR/la.txt") 
+	PEAK=$(awk '/Peak:/ {print $2}' "$TEMPDIR/la.txt") 
+	SHORT=$(awk -F 'S:|I:' '{print $2}' "$TEMPDIR/la.txt" | sort -rg | head -n 1) 
+	MOM=$(awk -F 'M:|S:' '{print $2}' "$TEMPDIR/la.txt" | sort -rg | head -n 1)
+	LRA=$(awk '/LRA:     / {print $2}' "$TEMPDIR/la.txt")
+	echo "$FILENAME|$PEAK|$INT|$SHORT|$MOM|$LRA" >> "$TEMPDIR/tempanalysis"
+	echo -ne 'Analyzing...'$NUM'/'$NUMARG'\r'  
+	((NUM=NUM+1))
+
+elif [ -f "$file" ]
+then
+	((SKIPPED=SKIPPED+1))
+	echo "$file" >> "$TEMPDIR/skipped.txt"
+else
+:
+fi
+done
+
+wait
+
+if [ -f "$TEMPDIR/album.txt" ]
+then
+	AINT=$(awk '/I:   / {print $2}' "$TEMPDIR/album.txt") 
+	APEAK=$(awk '/Peak:/ {print $2}' "$TEMPDIR/album.txt") 
+	ASHORT=$(awk -F 'S:|I:' '{print $2}' "$TEMPDIR/album.txt" | sort -rg | head -n 1) 
+	AMOM=$(awk -F 'M:|S:' '{print $2}' "$TEMPDIR/album.txt" | sort -rg | head -n 1)
+	ALRA=$(awk '/LRA:     / {print $2}' "$TEMPDIR/album.txt")
+	echo >> "$TEMPDIR/tempanalysis"
+	echo "Album|$APEAK|$AINT|$ASHORT|$AMOM|$ALRA" >> "$TEMPDIR/tempanalysis"
+fi
+
+	#Format analysis data and print	
+	echo
+	echo	
+	cat $TEMPDIR/tempanalysis | column -L -t -s "|" "$TEMPDIR/tempanalysis" | tee "$dirname/loudness_analysis.txt"
+	echo
+	echo "Skipped files: $SKIPPED"
+	cat "$TEMPDIR/skipped.txt"
+	printf "\n" >> "$dirname/loudness_analysis.txt"	
+	date >> "$dirname/loudness_analysis.txt"
+
+rm -r "$TEMPDIR"

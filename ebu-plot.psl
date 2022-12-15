@@ -1,0 +1,126 @@
+# Generates Loudness plots
+# uses ffmpeg to generate loudness data
+# formats into csv
+# uses gnuplot to draw graphs
+#
+# User "L5730"
+# https://www.audiosciencereview.com/forum/index.php?threads/offline-loudness-lufs-plotting.19296/
+#
+# Usage: Powershell.exe -file <this script.ps1> -infile <some audio file> -w <img width pxls> -h <img height pxls> -outplot <output plot image path .png>
+
+Param(
+    $infile,
+    $w,
+    $h,
+    $outplot
+    )
+
+
+$outcsv = "/tmp/loudnesscsv.txt"
+$gnuplotcommandfile = "/tmp/gnuplotcmdfile.txt"
+$gnuplot_histodata = "/tmp/gnuplot_histo_data.txt"
+if(!$outplot){$outplot = "./LoudnessPlot.png"}
+
+#
+if(!$w){$w=1280}
+if(!$h){$h=720}
+
+
+Write-Host "Getting Loudness Data with ffmpeg."
+$lufs_data = & ffmpeg -i $infile -af ebur128=peak=true -ar 4410 -f null - 2>&1
+#$lufs_data | Out-File "/tmp/lufsdata.txt" -Encoding ASCII
+
+$lra_high = ($lufs_data | select-string "LRA high:") -replace("[^0-9-.]")
+$lra_low = ($lufs_data | select-string "LRA low:") -replace("[^0-9-.]")
+$I_LUFS = ($lufs_data | select-string "I:      ") -replace("[^0-9-.]")
+$lrange = ($lufs_data | select-string "LRA:      ") -replace("[^0-9-.]")
+$tp = ($lufs_data | select-string "Peak:") -replace("[^0-9-.]")        
+
+$artist = (($lufs_data | select-string ("ARTIST  ")) -split ": ")[1]
+$album = (($lufs_data | select-string ("ALBUM  ")) -split ": ")[1]
+$title = (($lufs_data | select-string ("TITLE  ")) -split ": ")[1]
+$track = (($lufs_data | select-string ("TRACK  ")) -split ": ")[1]
+
+$plottitle = @($artist, $album, $('{0:d2}' -f [int]$track), $title) -join " - " 
+if($plottitle -eq " -  - 00 - "){$plottitle = $infile}
+
+Write-Host "Data Collected, now formatting to csv file."
+$csv = $(
+ForEach($rawentry in $lufs_data){
+    $entry = if($rawentry -match "parsed_ebur128"){$rawentry}
+    $array_tmsir = $entry -split(":") -split (" ") | ?{$_ -ne ""} | Select-Object -index 4,9,11,13,16,19,20
+
+    if($array_tmsir){
+        $time = $([math]::Round($array_tmsir[0],1))
+        $Momentary = if($array_tmsir[1] -eq "-120.7"){"-"}else{$array_tmsir[1]}
+        $Short = if($array_tmsir[2] -eq "-120.7"){"-"}else{$array_tmsir[2]}
+        $Integrated = if([decimal]($array_tmsir[3]) -le "-70.0"){"-"}else{$array_tmsir[3]}
+        $lra = if($time -lt 3.4){"-"}else{$array_tmsir[4]}
+        
+        $tpk_l = if($array_tmsir[5] -match "-inf"){"-144"}else{$array_tmsir[5]}
+        $tpk_r = if($array_tmsir[6] -match "inf"){"-144"}else{$array_tmsir[6]}
+#        $tpk_l = $array_tmsir[5]
+#        $tpk_r = $array_tmsir[6]
+
+        $tpk = if([decimal]$tpk_l -gt [decimal]$tpk_r){$tpk_l}else{$tpk_r}
+#        $over = if([decimal]$tpk -ge "-1"){$tpk}else{"-"}
+#        $under = if([decimal]$tpk -lt "-1"){$tpk}else{"-"}
+
+        "$time,$Momentary,$Short,$Integrated,$lra,$tpk_l,$tpk_r,$tpk"
+    }
+}
+)
+$csv | Out-String | Out-File $outcsv -Encoding ASCII
+$entries = $csv.count
+
+Write-Host "Running GNUPlot..."
+$gnuplotinstructions = $(
+"set terminal png truecolor size $w,$h;"
+"set output '$outplot';"
+"set title `"$($plottitle -replace("\\","\\")) \n (True Peak Max = $tp dBTP)`" noenhanced;"
+"set datafile separator ',';"
+"set key inside center top Left reverse maxrows 2 width -4;"
+
+"set yrange [-60:6];"
+"set ylabel 'Loudness (LUFS)';"
+"set ytic 6;"
+"set mytics 2;"
+
+"set ytics nomirror;"
+"set y2tics;"
+"set y2range [0:34.5];"
+"set y2tic 2;"
+"set y2label 'Loudness Range (LU) and PSR (LU)';"
+
+"set grid;"
+
+"set xdata time;"
+"set format x '%M:%S';"
+"set xlabel 'Time (MM:SS)';"
+"set autoscale xfix;"
+"set palette model RGB defined (0 'red', 6 'red', 9 'orange', 13 'green', 21 'blue');"
+"set cbrange [0:21];"
+"unset colorbox;"
+
+"plot \"
+"$lra_high with filledcurves above y=$lra_low fc rgb '#00aa00' fs transparent solid 0.1 noborder title 'LRA H: $lra_high - L: $lra_low LUFS', \"
+"'$outcsv' using (`$0/10):2 axes x1y1 with lines lc rgb '#ff0000' lw 1 title 'Momentary', \"
+"               '' using (`$0/10):(`$8) with lines lc rgb '#00ff00' lw 1 title 'True Peak', \"
+"               '' using (`$0/10):((`$8>-1)?(`$8):(1/0)) with lines lc rgb '#ff0000' lw 5 title 'True Peak Overs', \"
+"               '' using (`$0/10):(`$8-`$3):(`$8-`$3) with boxes lc palette fs transparent solid 0.3 noborder axes x1y2 notitle, \"
+"               '' using (`$0/10):3 axes x1y1 with lines lc rgb '#8080ff' lw 3 title 'Short-Term', \"
+              
+"               '' using (`$0/10):4 axes x1y1 with lines lc rgb '#0000ff' lw 4 title 'Integrated: $I_LUFS LUFS', \"
+"               '' using (`$0/10):5 axes x1y2 with lines lc rgb '#008000' lw 3 title 'Loudness Range: $lrange LU'; \"
+
+
+) | Out-String
+$gnuplotinstructions | Out-File $gnuplotcommandfile -Encoding ASCII
+
+gnuplot "$gnuplotcommandfile"
+
+Remove-Item -LiteralPath $outcsv
+Remove-Item -LiteralPath $gnuplotcommandfile
+Remove-Item -LiteralPath $gnuplot_histodata -ErrorAction silentlycontinue
+
+exit

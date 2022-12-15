@@ -1,0 +1,86 @@
+#!/bin/bash
+# Wrapper for PowerShell script for creating loudness plots of audio files
+#
+# Usage: ebu-plot <infiles>
+#
+# Original author of PowerShell script:
+# User "L5730"
+
+# https://www.audiosciencereview.com/forum/index.php?threads/offline-loudness-lufs-plotting.19296/
+# Original info:Generates Loudness plots
+# uses ffmpeg to generate loudness data
+# formats into csv
+# uses gnuplot to draw graphs
+
+W=1280
+H=720
+
+#Check for audio files
+NUMARG=0
+for file in "$@"; do
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == wv ];
+then
+	((NUMARG=NUMARG+1))
+fi
+done
+
+# Check availability of dependencies
+function checkAvail()
+{
+	which "$1" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]
+	then
+		echo "tool \"$1\" not found." >&2
+		exit 1
+	fi
+}
+
+for tool in {pwsh,ffmpeg,gnuplot}; \
+	do checkAvail "$tool"; done
+
+# Command usage check
+if [ $# -eq 0 ]
+then
+	echo "Usage: ebu-plot <input files>"
+	exit
+elif [ $NUMARG -eq 0 ]
+then
+	echo "No compatible audio files present. ebu-plot accepts wav, aiff, flac, mp3, ogg, opus and wavpack."
+	exit
+else
+	:
+fi
+
+SKIPPED=0
+SKIPFILE=$(mktemp)
+
+path=$(realpath "$1")
+dirname="${path%/*}"
+mkdir -p "$dirname/ebu-plot"
+
+for file in "$@"; do
+
+if [ "${file##*.}" == wav ] || [ "${file##*.}" == aif ] || [ "${file##*.}" == aiff ] || [ "${file##*.}" == flac ] || [ "${file##*.}" == ogg ] || [ "${file##*.}" == mp3 ] || [ "${file##*.}" == opus ] || [ "${file##*.}" == wv ]
+then
+	# Separate name of file 
+	FILENAME=${file##*/}
+	FNAME="${FILENAME%.*}"
+	EXT="${file##*.}"
+	echo "Processing $file..."
+	pwsh -file /usr/local/bin/ebu-plot.psl -infile "$file" -w $W -h $H -outplot "$dirname/ebu-plot/$FNAME-$EXT-ebu-plot.png"
+	echo
+elif 	[ -f "$file" ]
+then
+	((SKIPPED=SKIPPED+1))
+	echo "$file" >> $SKIPFILE
+else
+	:
+fi
+
+done
+echo "Done!"
+echo
+echo "Skipped items: $SKIPPED"
+cat $SKIPFILE
+rm $SKIPFILE
