@@ -34,7 +34,8 @@ TEMPDIR=$(mktemp -d)
 if [ $# -eq 0 ]
 then
 	echo "Usage: ebu-scan [-a] <input files>"
-	echo "Where -a treats files as an album"
+	echo "Options:"
+	echo " -a	Treat files as an album"
 	exit
 elif [ "$1" = "-a" ] && [ $# -eq 1 ]
 then
